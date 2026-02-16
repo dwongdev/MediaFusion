@@ -11,10 +11,18 @@ const API_KEY_STORAGE_KEY = 'mediafusion_api_key'
 export interface InstanceInfo {
   is_public: boolean
   requires_api_key: boolean
+  setup_required: boolean
   addon_name: string
   version: string
   logo_url: string
   branding_svg: string | null // Optional partner/host SVG logo URL
+}
+
+export interface SetupCompleteRequest {
+  api_password: string
+  email: string
+  username?: string
+  password: string
 }
 
 export interface TelegramFeatureConfig {
@@ -110,6 +118,24 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
   }
 }
 
+/**
+ * Create the first admin account during initial setup.
+ * This endpoint is unauthenticated; it is protected by requiring the
+ * instance API_PASSWORD in the request body.
+ */
+export async function completeSetup(data: SetupCompleteRequest): Promise<import('@/types').AuthResponse> {
+  const response = await fetch(`${API_BASE_URL}/instance/setup/create-admin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Setup failed' }))
+    throw new Error(error.detail || 'Setup failed')
+  }
+  return response.json()
+}
+
 export const instanceApi = {
   getInstanceInfo,
   getAppConfig,
@@ -117,4 +143,5 @@ export const instanceApi = {
   setStoredApiKey,
   clearStoredApiKey,
   validateApiKey,
+  completeSetup,
 }

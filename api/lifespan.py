@@ -32,6 +32,7 @@ async def lifespan(_: FastAPI):
     """
     # Startup logic
     await database.init()
+
     await torrent.init_best_trackers()
 
     # Register Telegram bot commands if enabled

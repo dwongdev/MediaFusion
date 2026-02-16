@@ -26,6 +26,7 @@ from db.crud.media import (
     add_external_id,
     get_media_by_external_id,
     get_or_create_metadata_provider,
+    invalidate_meta_cache,
     parse_external_id,
 )
 from db.crud.providers import get_or_create_provider
@@ -33,6 +34,7 @@ from db.crud.reference import (
     get_or_create_catalog,
     get_or_create_genre,
 )
+from db.crud.stream_services import invalidate_media_stream_cache
 from db.enums import MediaType, TorrentType
 from db.models import (
     AkaTitle,
@@ -320,9 +322,7 @@ async def get_or_create_metadata(
     poster_url = metadata_data.get("poster")
     background_url = metadata_data.get("background") or metadata_data.get("backdrop")
     if poster_url or background_url:
-        mf_provider = await get_or_create_metadata_provider(
-            session, "mediafusion", "MediaFusion"
-        )
+        mf_provider = await get_or_create_metadata_provider(session, "mediafusion", "MediaFusion")
         if poster_url:
             session.add(
                 MediaImage(
@@ -437,6 +437,10 @@ async def update_metadata(
 
     await session.exec(sa_update(Media).where(Media.id == media.id).values(**update_fields))
     await session.flush()
+
+    # Invalidate the cached Stremio meta response so the next request sees fresh data
+    await invalidate_meta_cache(meta_id)
+
     return True
 
 
@@ -1459,6 +1463,14 @@ async def store_new_torrent_streams(
             )
 
     await session.flush()
+
+    # Invalidate stream cache for all affected media
+    if media_ids_to_update:
+        from db.crud.stream_services import invalidate_media_stream_cache
+
+        for media_id in media_ids_to_update:
+            await invalidate_media_stream_cache(media_id)
+
     return stored
 
 
@@ -1701,6 +1713,12 @@ async def store_new_usenet_streams(
             )
 
     await session.flush()
+
+    # Invalidate stream cache for all affected media
+    if media_ids_to_update:
+        for media_id in media_ids_to_update:
+            await invalidate_media_stream_cache(media_id)
+
     return stored
 
 

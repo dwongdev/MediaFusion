@@ -241,6 +241,10 @@ class RedisWrapper:
         """Redis GET operation."""
         return self._create_method("get", None)(key)
 
+    def mget(self, keys: list[str]):
+        """Redis MGET operation - batch get multiple keys at once."""
+        return self._create_method("mget", [])(keys)
+
     def getex(self, key: str, ex: int):
         """Redis GETEX operation."""
         return self._create_method("getex", None)(key, ex)
@@ -271,6 +275,18 @@ class RedisWrapper:
             return self._create_method("hset", 0)(name, mapping=mapping)
         else:
             return self._create_method("hset", 0)(name, key, value)
+
+    def hsetnx(self, name: str, key: str, value: Any):
+        """Redis HSETNX operation - set hash field only if it does not exist."""
+        return self._create_method("hsetnx", False)(name, key, value)
+
+    def hincrby(self, name: str, key: str, amount: int = 1):
+        """Redis HINCRBY operation - increment hash field by integer amount."""
+        return self._create_method("hincrby", 0)(name, key, amount)
+
+    def hincrbyfloat(self, name: str, key: str, amount: float):
+        """Redis HINCRBYFLOAT operation - increment hash field by float amount."""
+        return self._create_method("hincrbyfloat", 0.0)(name, key, amount)
 
     def hlen(self, name: str):
         """Redis HLEN operation."""
@@ -430,6 +446,22 @@ class RedisWrapper:
     def zrange(self, name: str, start: int, end: int, withscores: bool = False):
         """Redis ZRANGE operation."""
         return self._create_method("zrange", [])(name, start, end, withscores=withscores)
+
+    def zrevrange(self, name: str, start: int, end: int, withscores: bool = False):
+        """Redis ZREVRANGE operation."""
+        return self._create_method("zrevrange", [])(name, start, end, withscores=withscores)
+
+    def zremrangebyrank(self, name: str, min_rank: int, max_rank: int):
+        """Redis ZREMRANGEBYRANK operation."""
+        return self._create_method("zremrangebyrank", 0)(name, min_rank, max_rank)
+
+    def pfadd(self, name: str, *values):
+        """Redis PFADD operation - add elements to a HyperLogLog."""
+        return self._create_method("pfadd", 0)(name, *values)
+
+    def pfcount(self, *names):
+        """Redis PFCOUNT operation - return approximate cardinality of a HyperLogLog."""
+        return self._create_method("pfcount", 0)(*names)
 
     def memory_usage(self, key: str):
         """Redis MEMORY USAGE operation."""

@@ -31,6 +31,8 @@ from db.schemas import (
 from streaming_providers import mapper
 from streaming_providers.cache_helpers import (
     get_cached_status,
+    is_cache_check_done,
+    mark_cache_check_done,
     store_cached_info_hashes,
 )
 from utils import const
@@ -180,26 +182,32 @@ async def filter_and_sort_streams(
                 uncached_streams.append(stream)
 
         # For streams not found in Redis cache, use provider's cache check
+        # but only if we haven't already checked this provider+media recently.
         if uncached_streams:
-            cache_update_function = mapper.CACHE_UPDATE_FUNCTIONS.get(service)
-            if cache_update_function:
-                try:
-                    service_name = await cache_update_function(
-                        streams=uncached_streams,
-                        streaming_provider=primary_provider,
-                        user_ip=user_ip,
-                        stremio_video_id=stremio_video_id,
-                    )
-                    # Store only the cached ones in Redis
-                    cached_info_hashes = [stream.info_hash for stream in uncached_streams if stream.cached]
-                    if cached_info_hashes:
-                        await store_cached_info_hashes(
-                            primary_provider,
-                            cached_info_hashes,
-                            service_name,
+            already_checked = await is_cache_check_done(primary_provider, stremio_video_id)
+            if not already_checked:
+                cache_update_function = mapper.CACHE_UPDATE_FUNCTIONS.get(service)
+                if cache_update_function:
+                    try:
+                        service_name = await cache_update_function(
+                            streams=uncached_streams,
+                            streaming_provider=primary_provider,
+                            user_ip=user_ip,
+                            stremio_video_id=stremio_video_id,
                         )
-                except Exception as error:
-                    logging.exception(f"Failed to update cache status for {service}: {error}")
+                        # Store only the cached ones in Redis
+                        cached_info_hashes = [stream.info_hash for stream in uncached_streams if stream.cached]
+                        if cached_info_hashes:
+                            await store_cached_info_hashes(
+                                primary_provider,
+                                cached_info_hashes,
+                                service_name,
+                            )
+                    except Exception as error:
+                        logging.exception(f"Failed to update cache status for {service}: {error}")
+                # Mark check as done regardless of results so we skip the API
+                # call on subsequent requests within the TTL window.
+                await mark_cache_check_done(primary_provider, stremio_video_id)
 
         if primary_provider.only_show_cached_streams:
             cached_filtered_streams = [stream for stream in filtered_streams if stream.cached]
@@ -351,19 +359,17 @@ async def parse_stream_data(
         # Torrent: use all active providers; fall back to P2P (None) if none configured
         provider_list = active_providers if active_providers else [None]
 
-    # Collect streams per provider for grouping
-    per_provider_streams: list[list[Stream] | list[RichStream]] = []
-    last_filtered_reasons: dict = {}
-
-    for current_provider in provider_list:
-        # --- Per-provider filtering and cache checking ---
+    # Process each provider concurrently for cache checking and stream building
+    async def _process_single_provider(
+        current_provider: StreamingProvider | None,
+    ) -> tuple[list[Stream] | list[RichStream], dict]:
+        """Process a single provider: filter, cache-check, and build stream entries."""
         filtered_streams, filtered_reasons = await filter_and_sort_streams(
             streams, user_data, stremio_video_id, user_ip, provider_override=current_provider
         )
-        last_filtered_reasons = filtered_reasons
 
         if not filtered_streams:
-            continue
+            return [], filtered_reasons
 
         # --- Per-provider naming and URL setup ---
         has_streaming_provider = current_provider is not None
@@ -425,6 +431,15 @@ async def parse_stream_data(
             addon_name=addon_name,
             base_proxy_url_template=base_proxy_url_template,
         )
+        return provider_streams, filtered_reasons
+
+    # Run all providers in parallel
+    provider_results = await asyncio.gather(*[_process_single_provider(p) for p in provider_list])
+
+    per_provider_streams: list[list[Stream] | list[RichStream]] = []
+    last_filtered_reasons: dict = {}
+    for provider_streams, filtered_reasons in provider_results:
+        last_filtered_reasons = filtered_reasons
         if provider_streams:
             per_provider_streams.append(provider_streams)
 
@@ -916,21 +931,33 @@ def create_exception_stream(addon_name: str, description: str, exc_file_name: st
     )
 
 
-async def fetch_downloaded_info_hashes(user_data: UserData, user_ip: str | None) -> list[str]:
-    primary_provider = user_data.get_primary_provider()
-    if not primary_provider:
+async def fetch_downloaded_info_hashes(
+    user_data: UserData,
+    user_ip: str | None,
+    provider: StreamingProvider | None = None,
+) -> list[str]:
+    """
+    Fetch downloaded info hashes from a streaming provider's watchlist.
+
+    Args:
+        user_data: User configuration
+        user_ip: User's public IP for API calls
+        provider: Specific provider to fetch from. If None, uses the primary provider.
+    """
+    target_provider = provider or user_data.get_primary_provider()
+    if not target_provider:
         return []
 
     if fetch_downloaded_info_hashes_function := mapper.FETCH_DOWNLOADED_INFO_HASHES_FUNCTIONS.get(
-        primary_provider.service
+        target_provider.service
     ):
         try:
             downloaded_info_hashes = await fetch_downloaded_info_hashes_function(
-                streaming_provider=primary_provider, user_ip=user_ip
+                streaming_provider=target_provider, user_ip=user_ip
             )
             return downloaded_info_hashes
         except Exception as error:
-            logging.exception(f"Failed to fetch downloaded info hashes for {primary_provider.service}: {error}")
+            logging.exception(f"Failed to fetch downloaded info hashes for {target_provider.service}: {error}")
             pass
 
     return []
@@ -947,7 +974,8 @@ async def generate_manifest(user_data: UserData, genres: dict) -> dict:
     for provider in active_providers:
         short_name = STREAMING_PROVIDERS_SHORT_NAMES.get(provider.service, provider.service[:2].upper())
         provider_short_names.append(short_name)
-        if provider.enable_watchlist_catalogs:
+        # Only include providers that have watchlist support AND have it enabled
+        if provider.enable_watchlist_catalogs and provider.service in mapper.FETCH_DOWNLOADED_INFO_HASHES_FUNCTIONS:
             watchlist_providers.append(
                 {
                     "service": provider.service,

@@ -3,7 +3,7 @@ RSS Feed migrator for MongoDB to PostgreSQL migration.
 
 Updated for MediaFusion 5.0 architecture:
 - All RSS feeds are now user-based
-- System feeds are assigned to a system admin user
+- System feeds are assigned to the first active admin user
 """
 
 import logging
@@ -34,31 +34,34 @@ class RSSFeedMigrator:
         self.stats = migration.stats
         self.resume_mode = resume_mode
         self._existing_rss_feed_urls: set[str] = set()
-        self._system_user_id: int | None = None
+        self._admin_user_id: int | None = None
 
-    async def _ensure_system_user(self, session: AsyncSession) -> int:
-        """Ensure a system admin user exists for migrated feeds."""
-        # Check if system user already exists
-        stmt = select(User).where(User.email == "system@mediafusion.local")
-        result = await session.exec(stmt)
-        user = result.first()
+    async def _get_admin_user_id(self, session: AsyncSession) -> int:
+        """Get the admin user ID to assign migrated feeds to.
 
-        if user:
-            return user.id
-
-        # Create system user
-        system_user = User(
-            email="system@mediafusion.local",
-            username="system",
-            role=UserRole.ADMIN,
-            is_verified=True,
-            is_active=True,
+        Finds the first active admin user. Raises an error if none exists,
+        directing the user to complete the initial setup first.
+        """
+        stmt = (
+            select(User)
+            .where(
+                User.role == UserRole.ADMIN,
+                User.is_active.is_(True),
+            )
+            .order_by(User.id)
+            .limit(1)
         )
-        session.add(system_user)
-        await session.commit()
-        await session.refresh(system_user)
-        logger.info(f"✅ Created system user (id={system_user.id}) for RSS feed migration")
-        return system_user.id
+        result = await session.exec(stmt)
+        admin = result.first()
+
+        if admin:
+            logger.info("Assigning migrated RSS feeds to admin user: %s (id=%d)", admin.email, admin.id)
+            return admin.id
+
+        raise RuntimeError(
+            "No admin user found for RSS feed migration. "
+            "Please complete the initial setup first by creating an admin user via the web UI."
+        )
 
     async def _load_existing_rss_feed_urls(self):
         """Load existing RSS feed URLs from PostgreSQL for resume mode"""
@@ -77,9 +80,9 @@ class RSSFeedMigrator:
         """Migrate all RSS feeds from MongoDB to PostgreSQL"""
         logger.info("Starting RSS feed migration...")
 
-        # Ensure system user exists first
+        # Get admin user for feed ownership
         async with self.migration.get_session() as session:
-            self._system_user_id = await self._ensure_system_user(session)
+            self._admin_user_id = await self._get_admin_user_id(session)
 
         # Load existing URLs for resume mode
         if self.resume_mode:
@@ -140,7 +143,7 @@ class RSSFeedMigrator:
     def _transform_rss_feed(self, old_feed: OldRSSFeed) -> dict:
         """Transform RSS feed to new format (user-based)"""
         return {
-            "user_id": self._system_user_id,  # Assign to system user
+            "user_id": self._admin_user_id,  # Assign to admin user
             "name": old_feed.name,
             "url": old_feed.url,
             "is_active": old_feed.active,
